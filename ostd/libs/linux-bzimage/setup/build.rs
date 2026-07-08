@@ -28,6 +28,7 @@ fn main() {
 
         println!("cargo:rerun-if-changed={}", payload_file.display());
         println!("cargo:rerun-if-changed={}", lds.display());
+        println!("cargo:rerun-if-changed=src/x86/header.S");
         println!("cargo:rustc-link-arg=-T{}", out_lds.display());
     } else {
         println!("cargo:warning=Unsupported target: {}", target_arch);

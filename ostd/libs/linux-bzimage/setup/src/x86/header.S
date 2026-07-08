@@ -21,7 +21,7 @@ setup_sects:            .byte SETUP_SECTS
 root_flags:             .word 1
 syssize:                .long 0
 ram_size:               .word 0
-vid_mode:               .word 0xfffd
+vid_mode:               .word 0xffff
 root_dev:               .word 0
 boot_flag:              .word 0xAA55
 jump:                   .byte 0xeb
