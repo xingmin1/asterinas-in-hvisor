@@ -9,6 +9,7 @@ use crate::{
     cpu::PinCurrentCpu,
     cpu_local,
     io::{IoMem, IoMemAllocatorBuilder, Sensitive},
+    task::disable_preempt,
 };
 
 mod x2apic;
@@ -119,6 +120,12 @@ pub trait Apic: ApicTimer {
     unsafe fn send_ipi(&self, icr: Icr);
 }
 
+/// Returns the current CPU's physical APIC ID in the active APIC mode.
+pub(in crate::arch) fn current_id() -> ApicId {
+    let preempt_guard = disable_preempt();
+    ApicId::from(get_or_init(&preempt_guard as _).id())
+}
+
 pub trait ApicTimer {
     /// Sets the initial timer count, the APIC timer will count down from this value.
     fn set_timer_init_count(&self, value: u64);
@@ -216,6 +223,15 @@ pub enum ApicId {
 }
 
 impl ApicId {
+    /// Returns the destination field value used by an I/O APIC compatibility RTE.
+    pub fn ioapic_rte_destination(&self) -> Option<u8> {
+        match *self {
+            ApicId::XApic(id) => Some(id),
+            ApicId::X2Apic(id) if id <= u8::MAX as u32 => Some(id as u8),
+            ApicId::X2Apic(_) => None,
+        }
+    }
+
     /// Returns the logical x2apic ID.
     ///
     /// In x2APIC mode, the 32-bit logical x2APIC ID, which can be read from

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use bit_field::BitField;
 use x86::{
     apic::xapic,
     msr::{IA32_APIC_BASE, rdmsr, wrmsr},
@@ -67,7 +68,12 @@ impl XApic {
 
 impl super::Apic for XApic {
     fn id(&self) -> u32 {
-        unsafe { self.io_mem.read_once(xapic::XAPIC_ID as usize) }
+        // The xAPIC ID register stores the physical APIC ID in bits 24..31.
+        unsafe {
+            self.io_mem
+                .read_once::<u32>(xapic::XAPIC_ID as usize)
+                .get_bits(24..32)
+        }
     }
 
     fn version(&self) -> u32 {

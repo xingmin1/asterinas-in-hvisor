@@ -5,10 +5,14 @@ mod table;
 use core::fmt::Debug;
 
 use spin::Once;
+use table::ExtendedInterruptMode;
 pub(super) use table::IntRemappingTable;
 
 use crate::{
-    arch::iommu::registers::{ExtendedCapabilityFlags, IOMMU_REGS},
+    arch::{
+        iommu::registers::{ExtendedCapabilityFlags, IOMMU_REGS},
+        kernel::apic::{self, ApicId},
+    },
     info, warn,
 };
 
@@ -22,15 +26,21 @@ impl IrtEntryHandle {
         self.index
     }
 
-    pub fn enable(&self, vector: u32) {
-        self.table
-            .set_entry(self.index, table::IrtEntry::new_enabled(vector));
+    pub fn enable(&self, vector: u32) -> bool {
+        if !self
+            .table
+            .set_enabled_entry(self.index, vector, apic::current_id())
+        {
+            warn!("failed to encode interrupt-remapping destination");
+            return false;
+        }
 
         IOMMU_REGS
             .get()
             .unwrap()
             .lock()
             .invalidate_interrupt_cache();
+        true
     }
 }
 
@@ -60,9 +70,16 @@ pub(super) fn init() {
         warn!("Interrupt remapping not supported");
         return;
     }
+    let extended_interrupt_mode = if extend_cap.flags().contains(ExtendedCapabilityFlags::EIM)
+        && matches!(apic::current_id(), ApicId::X2Apic(_))
+    {
+        ExtendedInterruptMode::X2Apic
+    } else {
+        ExtendedInterruptMode::XApic
+    };
 
     // Create interrupt remapping table
-    REMAPPING_TABLE.call_once(IntRemappingTable::new);
+    REMAPPING_TABLE.call_once(|| IntRemappingTable::new(extended_interrupt_mode));
     iommu_regs.enable_interrupt_remapping(REMAPPING_TABLE.get().unwrap());
 
     info!("Interrupt remapping enabled");

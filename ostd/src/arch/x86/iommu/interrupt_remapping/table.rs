@@ -2,19 +2,20 @@
 
 use core::fmt::Debug;
 
+use bit_field::BitField;
 use bitflags::bitflags;
 use id_alloc::IdAlloc;
 use int_to_c_enum::TryFromInt;
 
 use super::IrtEntryHandle;
 use crate::{
-    mm::{FrameAllocOptions, HasPaddr, PAGE_SIZE, Segment, io::util::HasVmReaderWriter},
+    arch::kernel::apic::ApicId,
+    mm::{io::util::HasVmReaderWriter, FrameAllocOptions, HasPaddr, Segment, PAGE_SIZE},
     sync::{LocalIrqDisabled, SpinLock},
 };
 
-#[expect(dead_code)]
-#[derive(Debug)]
-enum ExtendedInterruptMode {
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ExtendedInterruptMode {
     XApic,
     X2Apic,
 }
@@ -42,7 +43,7 @@ impl IntRemappingTable {
     }
 
     /// Creates an Interrupt Remapping Table with one page.
-    pub(super) fn new() -> Self {
+    pub(super) fn new(extended_interrupt_mode: ExtendedInterruptMode) -> Self {
         const NUM_PAGES: usize = 1;
 
         let segment = FrameAllocOptions::new()
@@ -54,7 +55,7 @@ impl IntRemappingTable {
 
         Self {
             num_entries,
-            extended_interrupt_mode: ExtendedInterruptMode::X2Apic,
+            extended_interrupt_mode,
             segment,
             modification_lock: SpinLock::new(()),
             allocator: SpinLock::new(IdAlloc::with_capacity(num_entries as usize)),
@@ -62,7 +63,16 @@ impl IntRemappingTable {
     }
 
     /// Sets the entry in the Interrupt Remapping Table.
-    pub(super) fn set_entry(&self, index: u16, entry: IrtEntry) {
+    pub(super) fn set_enabled_entry(&self, index: u16, vector: u32, destination: ApicId) -> bool {
+        let Some(entry) = IrtEntry::new_enabled(vector, destination, &self.extended_interrupt_mode)
+        else {
+            return false;
+        };
+        self.set_entry(index, entry);
+        true
+    }
+
+    fn set_entry(&self, index: u16, entry: IrtEntry) {
         let _guard = self.modification_lock.lock();
 
         let [lower, upper] = entry.as_raw_u64();
@@ -107,6 +117,23 @@ impl IntRemappingTable {
         };
 
         encoded
+    }
+}
+
+impl ExtendedInterruptMode {
+    fn encode_destination(&self, destination: ApicId) -> Option<u128> {
+        match (self, destination) {
+            (ExtendedInterruptMode::XApic, ApicId::XApic(id)) => Some((id as u128) << 40),
+            (ExtendedInterruptMode::XApic, ApicId::X2Apic(id)) => {
+                if id <= u8::MAX as u32 {
+                    Some((id.get_bits(0..8) as u128) << 40)
+                } else {
+                    None
+                }
+            }
+            (ExtendedInterruptMode::X2Apic, ApicId::XApic(id)) => Some((id as u128) << 32),
+            (ExtendedInterruptMode::X2Apic, ApicId::X2Apic(id)) => Some((id as u128) << 32),
+        }
     }
 }
 
@@ -165,9 +192,14 @@ pub struct IrtEntry(u128);
 impl IrtEntry {
     /// Creates an enabled entry with no validation,
     ///
-    /// DST = 0, IM = 0, DLM = 0, TM = 0, RH = 0, DM = 0, FPD = 1, P = 1
-    pub(super) fn new_enabled(vector: u32) -> Self {
-        Self(0b11 | ((vector as u128) << 16))
+    /// IM = 0, DLM = 0, TM = 0, RH = 0, DM = 0, FPD = 1, P = 1
+    fn new_enabled(
+        vector: u32,
+        destination: ApicId,
+        extended_interrupt_mode: &ExtendedInterruptMode,
+    ) -> Option<Self> {
+        let destination = extended_interrupt_mode.encode_destination(destination)?;
+        Some(Self(0b11 | ((vector as u128) << 16) | destination))
     }
 
     fn as_raw_u64(&self) -> [u64; 2] {

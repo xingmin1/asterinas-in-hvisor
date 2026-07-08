@@ -3,7 +3,9 @@
 use bit_field::BitField;
 
 use crate::{
-    Error, Result, info,
+    Error, Result,
+    arch::kernel::apic,
+    info,
     io::{IoMem, IoMemAllocatorBuilder, Sensitive},
     irq::IrqLine,
 };
@@ -23,6 +25,8 @@ pub(super) struct IoApic {
 }
 
 impl IoApic {
+    const IOREDTBL_MASKED: u32 = 1 << 16;
+
     /// # Safety
     ///
     /// The caller must ensure that the base address is a valid I/O APIC base address.
@@ -89,29 +93,38 @@ impl IoApic {
             value |= ((remapping_index & 0x8000) >> 4) as u64;
             value |= (remapping_index as u64 & 0x7FFF) << 49;
 
-            // SAFETY: `index` is inbound. It is safe to enable the redirection entry with the
-            // correct remapping index.
+            // SAFETY: `index` is inbound. The entry remains masked until both halves are ready.
             unsafe {
-                self.access.write(
-                    IoApicAccess::IOREDTBL + 2 * index,
+                self.write_redirection_entry(
+                    index,
                     value.get_bits(0..32) as u32,
-                );
-                self.access.write(
-                    IoApicAccess::IOREDTBL + 2 * index + 1,
                     value.get_bits(32..64) as u32,
                 );
             }
         } else {
-            // SAFETY: `index` is inbound. It is safe to enable the redirection entry with the
-            // legal IRQ number.
+            let Some(destination) = apic::current_id().ioapic_rte_destination() else {
+                return Err(Error::InvalidArgs);
+            };
+
+            // SAFETY: `index` is inbound. The entry remains masked until both halves are ready.
             unsafe {
-                self.access
-                    .write(IoApicAccess::IOREDTBL + 2 * index, irq.num() as u32);
-                self.access.write(IoApicAccess::IOREDTBL + 2 * index + 1, 0);
+                self.write_redirection_entry(index, irq.num() as u32, (destination as u32) << 24);
             }
         }
 
         Ok(())
+    }
+
+    unsafe fn write_redirection_entry(&mut self, index: u8, lower: u32, upper: u32) {
+        let lower_reg = IoApicAccess::IOREDTBL + 2 * index;
+        let upper_reg = lower_reg + 1;
+
+        // SAFETY: The caller guarantees that `index` is inbound and the RTE can be updated.
+        unsafe {
+            self.access.write(lower_reg, lower | Self::IOREDTBL_MASKED);
+            self.access.write(upper_reg, upper);
+            self.access.write(lower_reg, lower);
+        }
     }
 
     /// Disables an entry.
@@ -129,7 +142,7 @@ impl IoApic {
         unsafe {
             // "Bit 16: Interrupt Mask - R/W. When this bit is 1, the interrupt signal is masked."
             self.access
-                .write(IoApicAccess::IOREDTBL + 2 * index, 1 << 16);
+                .write(IoApicAccess::IOREDTBL + 2 * index, Self::IOREDTBL_MASKED);
             self.access.write(IoApicAccess::IOREDTBL + 2 * index + 1, 0);
         }
 

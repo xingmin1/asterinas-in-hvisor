@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use aster_cmdline::types::MmioDevice;
+use aster_cmdline::{parse::ParseParamValue, types::MmioDevice};
 pub(super) use ostd::arch::irq::MappedIrqLine;
 use ostd::{arch::irq::IRQ_CHIP, debug, info, warn};
 use spin::Once;
@@ -10,22 +11,43 @@ use spin::Once;
 use crate::transport::mmio::bus::MmioRegisterError;
 
 pub(super) fn probe_for_device() {
-    probe_from_kernel_cmdline();
-    probe_from_microvm_constants();
+    match probe_from_kernel_cmdline() {
+        CmdlineProbe::Absent => probe_from_microvm_constants(),
+        CmdlineProbe::Present {
+            registered_devices: 0,
+        } => warn!(
+            "Skip QEMU MicroVM VirtIO-MMIO fallback because virtio_mmio.device was specified but no device was registered"
+        ),
+        CmdlineProbe::Present { .. } => {}
+    }
 }
 
 static VIRTIO_MMIO_CMDLINE_DEVICES: Once<Vec<MmioDevice>> = Once::new();
-aster_cmdline::define_repeatable_kv_param!("virtio_mmio.device", VIRTIO_MMIO_CMDLINE_DEVICES);
+static VIRTIO_MMIO_CMDLINE_PRESENT: AtomicBool = AtomicBool::new(false);
+
+aster_cmdline::submit! {
+    aster_cmdline::KernelParam::new("virtio_mmio.device", setup_virtio_mmio_devices, false)
+}
+
+enum CmdlineProbe {
+    Absent,
+    Present { registered_devices: usize },
+}
 
 /// Probes Linux-compatible `virtio_mmio.device=<size>@<base>:<irq>[:<id>]` parameters.
 ///
 /// This format follows Linux's `virtio_mmio.device` kernel parameter.
-fn probe_from_kernel_cmdline() {
-    let Some(devices) = VIRTIO_MMIO_CMDLINE_DEVICES.get() else {
-        return;
+fn probe_from_kernel_cmdline() -> CmdlineProbe {
+    if !VIRTIO_MMIO_CMDLINE_PRESENT.load(Ordering::Relaxed) {
+        return CmdlineProbe::Absent;
     };
 
     let irq_chip = IRQ_CHIP.get().unwrap();
+    let devices = VIRTIO_MMIO_CMDLINE_DEVICES
+        .get()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut registered_devices = 0;
 
     for device in devices {
         info!(
@@ -43,16 +65,46 @@ fn probe_from_kernel_cmdline() {
             continue;
         };
 
-        if let Err(err) = super::try_register_mmio_device(device.base()..mmio_end, |irq_line| {
+        match super::try_register_mmio_device(device.base()..mmio_end, |irq_line| {
             irq_chip.map_gsi_pin_to(irq_line, device.irq().get())
         }) {
-            warn!(
+            Ok(()) => registered_devices += 1,
+            Err(err) => warn!(
                 "Ignore MMIO command-line device at {:#x} due to an error ({:?})",
                 device.base(),
                 err,
-            );
+            ),
         }
     }
+
+    CmdlineProbe::Present { registered_devices }
+}
+
+fn setup_virtio_mmio_devices(occurrences: &[Option<&str>]) {
+    if occurrences.is_empty() {
+        return;
+    }
+
+    VIRTIO_MMIO_CMDLINE_PRESENT.store(true, Ordering::Relaxed);
+
+    let devices = occurrences
+        .iter()
+        .filter_map(|occurrence| match occurrence {
+            Some(value) => match MmioDevice::parse_param(value) {
+                Ok(device) => Some(device),
+                Err(_) => {
+                    warn!("invalid value for kernel parameter 'virtio_mmio.device'");
+                    None
+                }
+            },
+            None => {
+                warn!("kernel parameter 'virtio_mmio.device' requires a value");
+                None
+            }
+        })
+        .collect();
+
+    VIRTIO_MMIO_CMDLINE_DEVICES.call_once(|| devices);
 }
 
 fn probe_from_microvm_constants() {
