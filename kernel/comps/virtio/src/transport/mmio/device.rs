@@ -53,6 +53,8 @@ impl MmioDevice for VirtioMmioTransport {
 }
 
 impl VirtioMmioTransport {
+    const QUEUE_DISCOVERY_LIMIT: u16 = 512;
+
     pub(super) fn mmio_device(&self) -> &Arc<VirtioMmioDevice> {
         &self.device
     }
@@ -85,6 +87,23 @@ impl VirtioMmioTransport {
                 .unwrap();
         }
         device
+    }
+
+    fn fallback_num_queues(&self) -> u16 {
+        let fallback = match self.device_type() {
+            VirtioDeviceType::Block | VirtioDeviceType::Entropy => 1,
+            VirtioDeviceType::Console | VirtioDeviceType::Input | VirtioDeviceType::Network => 2,
+            VirtioDeviceType::Socket => 3,
+            _ => Self::QUEUE_DISCOVERY_LIMIT,
+        };
+
+        warn!(
+            "virtio-mmio device {:?} did not expose an absent-queue sentinel within {} queues; assuming {} queues",
+            self.device_type(),
+            Self::QUEUE_DISCOVERY_LIMIT,
+            fallback
+        );
+        fallback
     }
 }
 
@@ -182,22 +201,21 @@ impl VirtioTransport for VirtioMmioTransport {
     fn num_queues(&self) -> u16 {
         // We use the field `queue_num_max` to get queue size.
         // If the queue is not exists, the field should be zero
-        let mut num_queues = 0;
-        const MAX_QUEUES: u32 = 512;
-        while num_queues < MAX_QUEUES {
+        let mut num_queues = 0u16;
+        while num_queues < Self::QUEUE_DISCOVERY_LIMIT {
             field_ptr!(&self.layout, VirtioMmioLayout, queue_sel)
-                .write_once(&num_queues)
+                .write_once(&(num_queues as u32))
                 .unwrap();
             if field_ptr!(&self.layout, VirtioMmioLayout, queue_num_max)
                 .read_once()
                 .unwrap()
                 == 0u32
             {
-                return num_queues as u16;
+                return num_queues;
             }
             num_queues += 1;
         }
-        todo!()
+        self.fallback_num_queues()
     }
 
     fn device_config_mem(&self) -> Option<IoMem> {
