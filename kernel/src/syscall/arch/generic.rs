@@ -102,6 +102,7 @@ macro_rules! import_generic_syscall_entries {
             recvmsg::sys_recvmsg,
             removexattr::{sys_fremovexattr, sys_lremovexattr, sys_removexattr},
             rename::sys_renameat2,
+            rseq::sys_rseq,
             rt_sigaction::sys_rt_sigaction,
             rt_sigpending::sys_rt_sigpending,
             rt_sigprocmask::sys_rt_sigprocmask,
@@ -398,6 +399,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_PREADV2 = 286                => sys_preadv2(args[..6]);
             SYS_PWRITEV2 = 287               => sys_pwritev2(args[..6]);
             SYS_STATX = 291                  => sys_statx(args[..5]);
+            SYS_RSEQ = 293                   => sys_rseq(args[..4]);
             SYS_PIDFD_SEND_SIGNAL = 424      => sys_pidfd_send_signal(args[..4]);
             SYS_PIDFD_OPEN = 434             => sys_pidfd_open(args[..2]);
             SYS_CLONE3 = 435                 => sys_clone3(args[..2], &user_ctx);
